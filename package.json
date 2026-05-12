@@ -2,7 +2,16 @@
   "name": "pi-crof",
   "version": "1.0.0",
   "description": "CrofAI provider extension for pi",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "crof-ai",
+    "crof",
+    "llm",
+    "ai-provider",
+    "openai-compatible"
+  ],
   "private": false,
   "license": "MIT",
   "pi": {
