@@ -78,7 +78,11 @@ const FALLBACK_MODELS: ModelConfig[] = [
 	{ id: "qwen3.6-27b",                     name: "CrofAI: Qwen 3.6 27B",                 reasoning: true,  input: ["text", "image"], cost: { input: 0.2,  output: 1.5,  cacheRead: 0.04,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
 	{ id: "qwen3.5-397b-a17b",               name: "CrofAI: Qwen 3.5 397B-A17B",           reasoning: true,  input: ["text", "image"], cost: { input: 0.35, output: 1.75, cacheRead: 0.07,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
 	{ id: "gemma-4-31b-it",                  name: "CrofAI: Gemma 4 31B",                  reasoning: true,  input: ["text", "image"], cost: { input: 0.1,  output: 0.3,  cacheRead: 0.02,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
+	{ id: "gemma-4-31b-it",                  name: "CrofAI: Gemma 4 31B",                  reasoning: true,  input: ["text", "image"], cost: { input: 0.1,  output: 0.3,  cacheRead: 0.02,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
 	{ id: "deepseek-v4-pro",                 name: "CrofAI: DeepSeek V4 Pro",              reasoning: true,  input: ["text"], cost: { input: 0.4,  output: 0.85, cacheRead: 0.003, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 131_072 },
+	{ id: "kimi-k2.5-lightning",             name: "CrofAI: Kimi K2.5 Lightning",          reasoning: true,  input: ["text", "image"], cost: { input: 1.0,  output: 3.0,  cacheRead: 0.2,   cacheWrite: 0 }, contextWindow: 131_072,   maxTokens: 32_768 },
+	{ id: "qwen3.5-9b",                      name: "CrofAI: Qwen 3.5 9B",                  reasoning: true,  input: ["text", "image"], cost: { input: 0.04, output: 0.15, cacheRead: 0.008, cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
+	{ id: "qwen3.5-9b-chat",                 name: "CrofAI: Qwen 3.5 9B Chat",             reasoning: true,  input: ["text", "image"], cost: { input: 0.04, output: 0.15, cacheRead: 0.008, cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
 ];
 
 // =============================================================================
@@ -128,7 +132,8 @@ export default async function (pi: ExtensionAPI) {
 
 	try {
 		models = await fetchModels();
-	} catch {
+	} catch (error) {
+		console.error("[pi-crof] Failed to fetch models, using static fallback:", error instanceof Error ? error.message : String(error));
 		models = FALLBACK_MODELS;
 	}
 
