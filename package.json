@@ -1,0 +1,14 @@
+{
+  "name": "pi-crof",
+  "version": "1.0.0",
+  "description": "CrofAI provider extension for pi",
+  "keywords": ["pi-package"],
+  "private": false,
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
