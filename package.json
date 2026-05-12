@@ -1,6 +1,6 @@
 {
   "name": "pi-crof",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CrofAI provider extension for pi",
   "keywords": [
     "pi",
@@ -13,6 +13,17 @@
     "openai-compatible"
   ],
   "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZoRDoK/pi-crof.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ZoRDoK/pi-crof/issues"
+  },
+  "homepage": "https://github.com/ZoRDoK/pi-crof#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT",
   "pi": {
     "extensions": ["./index.ts"]
