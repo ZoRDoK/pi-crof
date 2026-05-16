@@ -4,44 +4,27 @@
  * OpenAI-compatible provider at https://crof.ai/v1.
  * No custom streaming needed — delegates to built-in openai-completions.
  *
+ * Features:
+ * - Dynamic model discovery from https://crof.ai/v1/models
+ * - Persistent disk cache (~/.pi/agent/cache/pi-crof/models.json, TTL 1h)
+ * - Graceful degradation: cache → static fallback on API failure
+ * - Fetch timeouts (10s for models, 30s for chat)
+ *
  * Usage:
  *   # pi install git:git@github.com:ZoRDoK/pi-crof.git
  *   # Set CROF_API_KEY env var, or add key to ~/.pi/agent/auth.json as "crof"
  *   # Then /model crof/<model-id>
- *
- * Models are fetched dynamically from https://crof.ai/v1/models on startup.
- * Falls back to a static seed list if the API is unreachable.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { readCache, writeCache, type CrofCacheEntry } from "./src/cache.ts";
 
 // =============================================================================
-// Types
+// Constants
 // =============================================================================
 
-interface CrofApiModel {
-	id: string;
-	name: string;
-	context_length: number;
-	max_completion_tokens: number;
-	pricing: {
-		prompt: string;
-		completion: string;
-		cache_prompt?: string;
-	};
-	custom_reasoning?: boolean;
-	reasoning_effort?: boolean;
-}
-
-interface ModelConfig {
-	id: string;
-	name: string;
-	reasoning: boolean;
-	input: ("text" | "image")[];
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-	contextWindow: number;
-	maxTokens: number;
-}
+const BASE_URL = "https://crof.ai/v1";
+const FETCH_TIMEOUT_MS = 10_000;
 
 // =============================================================================
 // Vision-supporting models — sourced from crof.ai/pricing
@@ -60,10 +43,10 @@ const VISION_MODELS = new Set([
 ]);
 
 // =============================================================================
-// Fallback seed models — used when the API is unreachable
+// Fallback seed models — used when the API is unreachable and no cache exists
 // =============================================================================
 
-const FALLBACK_MODELS: ModelConfig[] = [
+const FALLBACK_MODELS: ProviderModelConfig[] = [
 	{ id: "deepseek-v4-pro-precision",       name: "CrofAI: DeepSeek V4 Pro (Precision)",  reasoning: true,  input: ["text"], cost: { input: 1.25, output: 2.5,  cacheRead: 0.1,   cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 131_072 },
 	{ id: "deepseek-v4-flash",               name: "CrofAI: DeepSeek V4 Flash",            reasoning: true,  input: ["text"], cost: { input: 0.12, output: 0.21, cacheRead: 0.02,  cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 131_072 },
 	{ id: "deepseek-v3.2",                   name: "CrofAI: DeepSeek V3.2",                reasoning: false, input: ["text"], cost: { input: 0.28, output: 0.38, cacheRead: 0.06,  cacheWrite: 0 }, contextWindow: 163_840,   maxTokens: 163_840 },
@@ -78,7 +61,6 @@ const FALLBACK_MODELS: ModelConfig[] = [
 	{ id: "qwen3.6-27b",                     name: "CrofAI: Qwen 3.6 27B",                 reasoning: true,  input: ["text", "image"], cost: { input: 0.2,  output: 1.5,  cacheRead: 0.04,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
 	{ id: "qwen3.5-397b-a17b",               name: "CrofAI: Qwen 3.5 397B-A17B",           reasoning: true,  input: ["text", "image"], cost: { input: 0.35, output: 1.75, cacheRead: 0.07,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
 	{ id: "gemma-4-31b-it",                  name: "CrofAI: Gemma 4 31B",                  reasoning: true,  input: ["text", "image"], cost: { input: 0.1,  output: 0.3,  cacheRead: 0.02,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
-	{ id: "gemma-4-31b-it",                  name: "CrofAI: Gemma 4 31B",                  reasoning: true,  input: ["text", "image"], cost: { input: 0.1,  output: 0.3,  cacheRead: 0.02,  cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
 	{ id: "deepseek-v4-pro",                 name: "CrofAI: DeepSeek V4 Pro",              reasoning: true,  input: ["text"], cost: { input: 0.4,  output: 0.85, cacheRead: 0.003, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 131_072 },
 	{ id: "kimi-k2.5-lightning",             name: "CrofAI: Kimi K2.5 Lightning",          reasoning: true,  input: ["text", "image"], cost: { input: 1.0,  output: 3.0,  cacheRead: 0.2,   cacheWrite: 0 }, contextWindow: 131_072,   maxTokens: 32_768 },
 	{ id: "qwen3.5-9b",                      name: "CrofAI: Qwen 3.5 9B",                  reasoning: true,  input: ["text", "image"], cost: { input: 0.04, output: 0.15, cacheRead: 0.008, cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
@@ -86,14 +68,14 @@ const FALLBACK_MODELS: ModelConfig[] = [
 ];
 
 // =============================================================================
-// Dynamic model fetching
+// Dynamic model fetching with timeout
 // =============================================================================
 
 function modelInput(id: string): ("text" | "image")[] {
 	return VISION_MODELS.has(id) ? ["text", "image"] : ["text"];
 }
 
-function mapApiModel(m: CrofApiModel): ModelConfig {
+function mapApiModel(m: CrofCacheEntry): ProviderModelConfig {
 	const reasoning = !!(m.custom_reasoning || m.reasoning_effort);
 	return {
 		id: m.id,
@@ -111,16 +93,32 @@ function mapApiModel(m: CrofApiModel): ModelConfig {
 	};
 }
 
-async function fetchModels(): Promise<ModelConfig[]> {
-	const res = await fetch("https://crof.ai/v1/models");
-	if (!res.ok) throw new Error(`API returned ${res.status}`);
+/**
+ * Fetch raw model data from the API with timeout.
+ * Returns the raw cache entries (suitable for caching) and the mapped provider models.
+ */
+async function fetchRawModels(): Promise<{
+	raw: CrofCacheEntry[];
+	models: ProviderModelConfig[];
+}> {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+	try {
+		const res = await fetch(`${BASE_URL}/models`, { signal: controller.signal });
+		if (!res.ok) throw new Error(`API returned ${res.status}`);
 
-	const body = (await res.json()) as { data?: CrofApiModel[] };
-	if (!body.data || !Array.isArray(body.data) || body.data.length === 0) {
-		throw new Error("API returned empty model list");
+		const body = (await res.json()) as { data?: CrofCacheEntry[] };
+		if (!body.data || !Array.isArray(body.data) || body.data.length === 0) {
+			throw new Error("API returned empty model list");
+		}
+
+		return {
+			raw: body.data,
+			models: body.data.map(mapApiModel),
+		};
+	} finally {
+		clearTimeout(timeout);
 	}
-
-	return body.data.map(mapApiModel);
 }
 
 // =============================================================================
@@ -128,19 +126,45 @@ async function fetchModels(): Promise<ModelConfig[]> {
 // =============================================================================
 
 export default async function (pi: ExtensionAPI) {
-	let models: ModelConfig[];
+	let models: ProviderModelConfig[];
+	let source: "api" | "cache" | "fallback" = "fallback";
 
 	try {
-		models = await fetchModels();
+		// 1. Try cache first
+		const cached = readCache();
+		if (cached) {
+			models = cached.models.map(mapApiModel);
+			source = "cache";
+			console.log(`[pi-crof] Loaded ${models.length} models from cache`);
+		} else {
+			// 2. No cache or expired — fetch from API and persist
+			const { raw, models: freshModels } = await fetchRawModels();
+			models = freshModels;
+			writeCache({ timestamp: Date.now(), models: raw });
+			source = "api";
+			console.log(`[pi-crof] Fetched ${models.length} models from API`);
+		}
 	} catch (error) {
-		console.error("[pi-crof] Failed to fetch models, using static fallback:", error instanceof Error ? error.message : String(error));
-		models = FALLBACK_MODELS;
+		// 3. API failed — try stale cache
+		const stale = readCache({ ignoreTTL: true });
+		if (stale) {
+			models = stale.models.map(mapApiModel);
+			source = "cache";
+			console.warn(`[pi-crof] API failed, using stale cache (${models.length} models):`, error instanceof Error ? error.message : String(error));
+		} else {
+			// 4. Nothing works — use static fallback
+			models = FALLBACK_MODELS;
+			source = "fallback";
+			console.error(`[pi-crof] API failed and no cache available, using static fallback (${models.length} models):`, error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	pi.registerProvider("crof", {
-		baseUrl: "https://crof.ai/v1",
+		baseUrl: BASE_URL,
 		apiKey: "CROF_API_KEY",
 		api: "openai-completions",
 		models,
 	});
+
+	console.log(`[pi-crof] Registered provider "crof" with ${models.length} models (source: ${source})`);
 }

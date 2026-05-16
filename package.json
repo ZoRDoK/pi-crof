@@ -2,6 +2,7 @@
   "name": "pi-crof",
   "version": "1.0.5",
   "description": "CrofAI provider extension for pi",
+  "type": "module",
   "keywords": [
     "pi",
     "pi-extension",
@@ -25,9 +26,18 @@
     "access": "public"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=20.6.0"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
     ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "tsx": "^4.22.0",
+    "typescript": "^6.0.3"
   }
 }

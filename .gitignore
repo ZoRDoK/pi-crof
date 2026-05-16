@@ -21,3 +21,7 @@ pnpm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# Plannotator
+PLAN.md
+plans/

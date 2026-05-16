@@ -5,15 +5,46 @@
  *   A) Extension unit test — verifies the extension factory registers a provider.
  *   B) API integration tests — hit the live CrofAI endpoint.
  *
- * Run: npx tsx test.ts
+ * Run unit tests:    node --experimental-strip-types --no-warnings test.ts
+ * Run all tests:     node --experimental-strip-types --no-warnings test.ts --all
+ *
  * API key lookup order:
  *   1) CROF_API_KEY env var
  *   2) ~/.pi/agent/auth.json -> crof.key
+ *
+ * Note: Integration tests (group B) require a valid API key and count as live
+ *       API usage. They are skipped unless --all is passed.
  */
 
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const CACHE_DIR = path.join(os.homedir(), ".pi", "agent", "cache", "pi-crof");
+const CACHE_FILE = path.join(CACHE_DIR, "models.json");
+
+/**
+ * Save cache state before a test and restore it after.
+ */
+function preserveCache(): () => void {
+	const hadCache = existsSync(CACHE_FILE);
+	const backup = hadCache ? readFileSync(CACHE_FILE, "utf-8") : null;
+
+	// Remove cache so tests start clean
+	if (hadCache) unlinkSync(CACHE_FILE);
+
+	return () => {
+		if (hadCache && backup !== null) {
+			mkdirSync(CACHE_DIR, { recursive: true });
+			writeFileSync(CACHE_FILE, backup);
+		}
+	};
+}
 
 // ---------------------------------------------------------------------------
 // A) Extension factory test (no live API calls)
@@ -22,7 +53,8 @@ import path from "node:path";
 async function testExtensionFactory() {
 	console.log("\n--- [A] Extension factory registers provider ---");
 
-	// Mock ExtensionAPI that captures registerProvider calls.
+	const restoreCache = preserveCache();
+
 	let capturedProviderName: string | undefined;
 	let capturedConfig: unknown = null;
 
@@ -33,24 +65,27 @@ async function testExtensionFactory() {
 		},
 	} as Parameters<typeof import("./index.ts").default>[0];
 
-	// Dynamic import with mocked fetch so we don't hit the live API.
+	// Mock fetch so we don't hit the live API
 	const origFetch = globalThis.fetch;
 	globalThis.fetch = async (url: RequestInfo | URL) => {
 		const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
 		if (urlStr.includes("/v1/models")) {
-			return new Response(JSON.stringify({
-				data: [
-					{
-						id: "captured-test-model",
-						name: "Test: Captured Model",
-						context_length: 4096,
-						max_completion_tokens: 1024,
-						pricing: { prompt: "0.01", completion: "0.02", cache_prompt: "0.001" },
-						custom_reasoning: false,
-						reasoning_effort: false,
-					},
-				],
-			}), { status: 200, headers: { "content-type": "application/json" } });
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "captured-test-model",
+							name: "Test: Captured Model",
+							context_length: 4096,
+							max_completion_tokens: 1024,
+							pricing: { prompt: "0.01", completion: "0.02", cache_prompt: "0.001" },
+							custom_reasoning: false,
+							reasoning_effort: false,
+						},
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
 		}
 		throw new Error(`Unexpected fetch: ${urlStr}`);
 	};
@@ -64,6 +99,7 @@ async function testExtensionFactory() {
 		loadError = err;
 	} finally {
 		globalThis.fetch = origFetch;
+		restoreCache();
 	}
 
 	if (loadError) throw new Error(`Extension factory threw: ${loadError}`);
@@ -212,9 +248,10 @@ async function testListModels(apiKey: string): Promise<ModelInfo[]> {
 async function testNonStreaming(apiKey: string, models: ModelInfo[]): Promise<void> {
 	console.log("\n--- [B2] POST /chat/completions (non-streaming) ---");
 
+	// Use only 1 non-precision model to minimize API calls
 	const candidates = [...new Set([
-		...["minimax-m2.5", "deepseek-v3.2", "glm-5"].filter((id) => models.some((m) => m.id === id)),
-		...models.filter(m => !isPrecision(m.id)).map(m => m.id).slice(0, 3),
+		"minimax-m2.5",
+		...models.filter(m => !isPrecision(m.id)).map(m => m.id).slice(0, 1),
 	])].filter((id): id is string => Boolean(id));
 
 	let lastError: Error | null = null;
@@ -374,15 +411,86 @@ async function testUsageApi(apiKey: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Cache unit tests
+// ---------------------------------------------------------------------------
+
+async function testCacheWriteAndRead() {
+	console.log("\n--- [C1] Cache write and read ---");
+
+	const restoreCache = preserveCache();
+
+	try {
+		const { writeCache, readCache, getCacheInfo } = await import("./src/cache.ts");
+
+		// Should be empty initially
+		const infoBefore = getCacheInfo();
+		console.log(`  Cache exists before write: ${infoBefore.exists}`);
+		if (infoBefore.exists) throw new Error("Cache should not exist before write");
+
+		// Write
+		writeCache({
+			timestamp: Date.now(),
+			models: [{ id: "test", name: "Test", context_length: 4096, max_completion_tokens: 1024, pricing: { prompt: "0.01", completion: "0.02" } }],
+		});
+
+		// Read should work
+		const data = readCache();
+		if (!data) throw new Error("Cache read returned null after write");
+		if (data.models.length !== 1) throw new Error(`Expected 1 model, got ${data.models.length}`);
+		if (data.models[0].id !== "test") throw new Error(`Expected id "test", got ${data.models[0].id}`);
+
+		const infoAfter = getCacheInfo();
+		console.log(`  Cache exists: ${infoAfter.exists}`);
+		console.log(`  Models: ${infoAfter.modelCount}`);
+		console.log(`  Age: ${infoAfter.age}`);
+		console.log(`  Size: ${infoAfter.size}`);
+
+		if (!infoAfter.exists) throw new Error("Cache info says not exists after write");
+		if (infoAfter.modelCount !== 1) throw new Error(`Expected 1 model in info, got ${infoAfter.modelCount}`);
+
+		console.log("  PASS");
+	} finally {
+		restoreCache();
+	}
+}
+
+async function testCacheTtl() {
+	console.log("\n--- [C2] Cache TTL expiry ---");
+
+	const restoreCache = preserveCache();
+
+	try {
+		const { writeCache, readCache } = await import("./src/cache.ts");
+
+		// Write with old timestamp (past TTL)
+		writeCache({
+			timestamp: Date.now() - 2 * 60 * 60 * 1000, // 2 hours ago (TTL is 1h)
+			models: [{ id: "stale", name: "Stale", context_length: 4096, max_completion_tokens: 1024, pricing: { prompt: "0.01", completion: "0.02" } }],
+		});
+
+		// Normal read should return null (expired)
+		const expired = readCache();
+		if (expired) throw new Error("Expired cache should return null");
+
+		// ignoreTTL should return it
+		const stale = readCache({ ignoreTTL: true });
+		if (!stale) throw new Error("ignoreTTL should return stale cache");
+		if (stale.models[0].id !== "stale") throw new Error(`Expected "stale", got ${stale.models[0].id}`);
+
+		console.log("  Normal read (expired):", expired === null ? "null ✓" : "FAIL");
+		console.log("  ignoreTTL read:", stale.models[0].id);
+		console.log("  PASS");
+	} finally {
+		restoreCache();
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-	const apiKey = await resolveApiKey();
-	if (!apiKey) {
-		console.error("Missing API key: set CROF_API_KEY or add crof.key to ~/.pi/agent/auth.json");
-		process.exit(1);
-	}
+	const runAll = process.argv.includes("--all");
 
 	console.log(`CrofAI Tests — ${BASE_URL}`);
 
@@ -393,16 +501,33 @@ async function main(): Promise<void> {
 		{ name: "extension-factory", fn: testExtensionFactory },
 	];
 
-	// Group B — live API integration
-	const models = await testListModels(apiKey);
-	const groupB: TestEntry[] = [
-		{ name: "non-streaming", fn: () => testNonStreaming(apiKey, models) },
-		{ name: "streaming", fn: () => testStreaming(apiKey, models) },
-		{ name: "reasoning", fn: () => testReasoning(apiKey, models) },
-		{ name: "usage", fn: () => testUsageApi(apiKey) },
+	// Group C — cache unit tests
+	const groupC: TestEntry[] = [
+		{ name: "cache-write-read", fn: testCacheWriteAndRead },
+		{ name: "cache-ttl", fn: testCacheTtl },
 	];
 
-	const allTests = [...groupA, ...groupB];
+	// Group B — live API integration (only with --all flag)
+	let groupB: TestEntry[] = [];
+	if (runAll) {
+		const apiKey = await resolveApiKey();
+		if (!apiKey) {
+			console.error("Missing API key: set CROF_API_KEY or add crof.key to ~/.pi/agent/auth.json");
+			process.exit(1);
+		}
+
+		const models = await testListModels(apiKey);
+		groupB = [
+			{ name: "non-streaming", fn: () => testNonStreaming(apiKey, models) },
+			{ name: "streaming", fn: () => testStreaming(apiKey, models) },
+			{ name: "reasoning", fn: () => testReasoning(apiKey, models) },
+			{ name: "usage", fn: () => testUsageApi(apiKey) },
+		];
+	} else {
+		console.log("\n(Skip group B — live API tests. Pass --all to run.)");
+	}
+
+	const allTests = [...groupA, ...groupC, ...groupB];
 	let passed = 0;
 	let failed = 0;
 
