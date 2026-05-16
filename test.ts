@@ -3,7 +3,8 @@
  *
  * Two kinds of tests:
  *   A) Extension unit test — verifies the extension factory registers a provider.
- *   B) API integration tests — hit the live CrofAI endpoint.
+ *   B) API integration tests — hit the live CrofAI endpoint (--all flag).
+ *   C) Cache unit tests — readCache/writeCache/TTL/corruption.
  *
  * Run unit tests:    node --experimental-strip-types --no-warnings test.ts
  * Run all tests:     node --experimental-strip-types --no-warnings test.ts --all
@@ -12,8 +13,8 @@
  *   1) CROF_API_KEY env var
  *   2) ~/.pi/agent/auth.json -> crof.key
  *
- * Note: Integration tests (group B) require a valid API key and count as live
- *       API usage. They are skipped unless --all is passed.
+ * Integration tests (group B) require a valid API key and count as live API usage.
+ * They are skipped unless --all is passed. Total ≤ ~10 requests per run.
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -25,23 +26,28 @@ import path from "node:path";
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CACHE_DIR = path.join(os.homedir(), ".pi", "agent", "cache", "pi-crof");
-const CACHE_FILE = path.join(CACHE_DIR, "models.json");
-
 /**
- * Save cache state before a test and restore it after.
+ * Create a temporary cache directory for tests and return a cleanup function.
+ * Sets PI_CROF_CACHE_DIR so src/cache.ts uses the temp dir.
  */
-function preserveCache(): () => void {
-	const hadCache = existsSync(CACHE_FILE);
-	const backup = hadCache ? readFileSync(CACHE_FILE, "utf-8") : null;
+function useTempCacheDir(): () => void {
+	const tmpDir = path.join(os.tmpdir(), `pi-crof-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+	mkdirSync(tmpDir, { recursive: true });
 
-	// Remove cache so tests start clean
-	if (hadCache) unlinkSync(CACHE_FILE);
+	const origEnv = process.env.PI_CROF_CACHE_DIR;
+	process.env.PI_CROF_CACHE_DIR = tmpDir;
 
 	return () => {
-		if (hadCache && backup !== null) {
-			mkdirSync(CACHE_DIR, { recursive: true });
-			writeFileSync(CACHE_FILE, backup);
+		process.env.PI_CROF_CACHE_DIR = origEnv;
+		// Cleanup temp files
+		try {
+			const modelsFile = path.join(tmpDir, "models.json");
+			if (existsSync(modelsFile)) unlinkSync(modelsFile);
+			const tmpFile = path.join(tmpDir, "models.json.tmp");
+			if (existsSync(tmpFile)) unlinkSync(tmpFile);
+			unlinkSync(tmpDir);
+		} catch {
+			// Best-effort cleanup
 		}
 	};
 }
@@ -53,7 +59,7 @@ function preserveCache(): () => void {
 async function testExtensionFactory() {
 	console.log("\n--- [A] Extension factory registers provider ---");
 
-	const restoreCache = preserveCache();
+	const restoreCache = useTempCacheDir();
 
 	let capturedProviderName: string | undefined;
 	let capturedConfig: unknown = null;
@@ -417,7 +423,7 @@ async function testUsageApi(apiKey: string): Promise<void> {
 async function testCacheWriteAndRead() {
 	console.log("\n--- [C1] Cache write and read ---");
 
-	const restoreCache = preserveCache();
+	const restoreCache = useTempCacheDir();
 
 	try {
 		const { writeCache, readCache, getCacheInfo } = await import("./src/cache.ts");
@@ -457,7 +463,7 @@ async function testCacheWriteAndRead() {
 async function testCacheTtl() {
 	console.log("\n--- [C2] Cache TTL expiry ---");
 
-	const restoreCache = preserveCache();
+	const restoreCache = useTempCacheDir();
 
 	try {
 		const { writeCache, readCache } = await import("./src/cache.ts");
@@ -485,6 +491,112 @@ async function testCacheTtl() {
 	}
 }
 
+async function testCacheCorruptedJson() {
+	console.log("\n--- [C3] Cache corrupted JSON ---");
+
+	const restoreCache = useTempCacheDir();
+
+	try {
+		const { writeCache, readCache, getCacheInfo } = await import("./src/cache.ts");
+		const { getCacheDir } = await import("./src/cache.ts");
+		const { join } = await import("node:path");
+		const { writeFileSync } = await import("node:fs");
+
+		// Write invalid JSON
+		const badFile = join(getCacheDir(), "models.json");
+		mkdirSync(getCacheDir(), { recursive: true });
+		writeFileSync(badFile, "this is not json", "utf-8");
+
+		// readCache should return null (not throw)
+		const data = readCache();
+		if (data !== null) throw new Error("readCache should return null for invalid JSON");
+
+		// getCacheInfo should still work (file exists even if corrupt)
+		const info = getCacheInfo();
+		if (info.exists !== true) throw new Error("Cache file should still exist even if corrupt");
+		if (info.age !== null) throw new Error("Age should be null for invalid data");
+		if (info.modelCount !== 0) throw new Error("Model count should be 0 for invalid data");
+		if (!info.size) throw new Error("Size should be reported even for invalid data");
+
+		console.log("  readCache with invalid JSON:", data === null ? "null ✓" : "FAIL");
+		console.log("  getCacheInfo exists:", info.exists);
+		console.log("  PASS");
+	} finally {
+		restoreCache();
+	}
+}
+
+async function testCacheCorruptedShape() {
+	console.log("\n--- [C4] Cache corrupted shape (missing timestamp) ---");
+
+	const restoreCache = useTempCacheDir();
+
+	try {
+		const { readCache, getCacheInfo, getCacheDir } = await import("./src/cache.ts");
+		const { writeFileSync, mkdirSync } = await import("node:fs");
+		const { join } = await import("node:path");
+
+		// Valid JSON but missing timestamp
+		const dir = getCacheDir();
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ models: [{ id: "x", name: "X", context_length: 100, max_completion_tokens: 100, pricing: { prompt: "0", completion: "0" } }] }));
+
+		// readCache should return null (validation fails)
+		const data = readCache();
+		if (data !== null) throw new Error("readCache should return null for data missing timestamp");
+
+		// Same with missing models array
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ timestamp: Date.now() }));
+		const data2 = readCache();
+		if (data2 !== null) throw new Error("readCache should return null for data missing models array");
+
+		// Same with empty models array (allowed but filtered)
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ timestamp: Date.now(), models: [] }));
+		const data3 = readCache();
+		if (data3 !== null) throw new Error("readCache should return null for empty models array (validated)");
+
+		// Entry missing 'name' field
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ timestamp: Date.now(), models: [{ id: "x", context_length: 100, max_completion_tokens: 100, pricing: { prompt: "0", completion: "0" } }] }));
+		const data4 = readCache();
+		if (data4 !== null) throw new Error("readCache should return null when all entries are invalid");
+
+		console.log("  Missing timestamp: null ✓");
+		console.log("  Missing models: null ✓");
+		console.log("  Empty models: null ✓");
+		console.log("  Missing name: null ✓");
+		console.log("  PASS");
+	} finally {
+		restoreCache();
+	}
+}
+
+async function testCacheTimestampValidation() {
+	console.log("\n--- [C5] Cache timestamp edge cases ---");
+
+	const restoreCache = useTempCacheDir();
+
+	try {
+		const { writeCache, readCache } = await import("./src/cache.ts");
+
+		// Future timestamp should work (not negative age crash)
+		writeCache({
+			timestamp: Date.now() + 86_400_000, // 1 day in the future
+			models: [{ id: "future", name: "Future", context_length: 4096, max_completion_tokens: 1024, pricing: { prompt: "0.01", completion: "0.02" } }],
+		});
+		const future = readCache();
+		if (!future) throw new Error("Future timestamp should be valid (not expired)");
+		if (future.models[0].id !== "future") throw new Error("Wrong model from future-timestamp cache");
+
+		// NaN timestamp should be caught by validation (not a number)
+		// This is handled by JSON.parse + validateCacheData
+
+		console.log("  Future timestamp:", future.models[0].id);
+		console.log("  PASS");
+	} finally {
+		restoreCache();
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -505,6 +617,9 @@ async function main(): Promise<void> {
 	const groupC: TestEntry[] = [
 		{ name: "cache-write-read", fn: testCacheWriteAndRead },
 		{ name: "cache-ttl", fn: testCacheTtl },
+		{ name: "cache-corrupted-json", fn: testCacheCorruptedJson },
+		{ name: "cache-corrupted-shape", fn: testCacheCorruptedShape },
+		{ name: "cache-timestamp-edge", fn: testCacheTimestampValidation },
 	];
 
 	// Group B — live API integration (only with --all flag)

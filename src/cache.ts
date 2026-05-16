@@ -5,7 +5,7 @@
  * with a configurable TTL.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -34,12 +34,49 @@ export interface CrofCacheData {
 
 // --- Paths ---
 
-function getCacheDir(): string {
+/**
+ * Get the cache directory path. Exported so tests can override via env var.
+ */
+export function getCacheDir(): string {
+	if (process.env.PI_CROF_CACHE_DIR) return process.env.PI_CROF_CACHE_DIR;
 	return join(getAgentDir(), "cache", "pi-crof");
 }
 
 function getCacheFile(): string {
 	return join(getCacheDir(), "models.json");
+}
+
+// --- Validation ---
+
+function isValidCacheData(data: unknown): data is CrofCacheData {
+	if (typeof data !== "object" || data === null) return false;
+	const d = data as Record<string, unknown>;
+	if (typeof d.timestamp !== "number" || !isFinite(d.timestamp)) return false;
+	if (!Array.isArray(d.models)) return false;
+	return true;
+}
+
+function isValidCacheEntry(entry: unknown): entry is CrofCacheEntry {
+	if (typeof entry !== "object" || entry === null) return false;
+	const e = entry as Record<string, unknown>;
+	if (typeof e.id !== "string") return false;
+	if (typeof e.name !== "string") return false;
+	return true;
+}
+
+/**
+ * Validate and clean cached models — drop invalid entries silently.
+ */
+export function validateCacheData(data: unknown): CrofCacheData | null {
+	if (!isValidCacheData(data)) return null;
+	const validModels: CrofCacheEntry[] = [];
+	for (const entry of data.models) {
+		if (isValidCacheEntry(entry)) {
+			validModels.push(entry);
+		}
+	}
+	if (validModels.length === 0) return null;
+	return { timestamp: data.timestamp, models: validModels };
 }
 
 // --- I/O ---
@@ -55,7 +92,9 @@ export function readCache(options?: { ignoreTTL?: boolean }): CrofCacheData | nu
 		const file = getCacheFile();
 		if (!existsSync(file)) return null;
 		const raw = readFileSync(file, "utf-8");
-		const data = JSON.parse(raw) as CrofCacheData;
+		const parsed = JSON.parse(raw);
+		const data = validateCacheData(parsed);
+		if (!data) return null;
 		if (!options?.ignoreTTL && Date.now() - data.timestamp > CACHE_TTL_MS) return null;
 		return data;
 	} catch {
@@ -64,14 +103,17 @@ export function readCache(options?: { ignoreTTL?: boolean }): CrofCacheData | nu
 }
 
 /**
- * Write model data to the cache file.
+ * Write model data to the cache file atomically.
+ * Writes to a temp file first, then renames to the final path.
  * Silently ignores errors (cache is non-critical).
  */
 export function writeCache(data: CrofCacheData): void {
 	try {
 		const dir = getCacheDir();
 		mkdirSync(dir, { recursive: true });
-		writeFileSync(getCacheFile(), JSON.stringify(data, null, 2));
+		const tmpFile = getCacheFile() + ".tmp";
+		writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+		renameSync(tmpFile, getCacheFile());
 	} catch {
 		// Cache writes are best-effort
 	}
@@ -87,26 +129,36 @@ export function getCacheInfo(): {
 	modelCount: number;
 } {
 	const file = getCacheFile();
-	if (!existsSync(file)) {
+	const fileExists = existsSync(file);
+	if (!fileExists) {
 		return { exists: false, age: null, size: null, modelCount: 0 };
 	}
+	let raw: string;
 	try {
-		const raw = readFileSync(file, "utf-8");
-		const data = JSON.parse(raw) as CrofCacheData;
-		const ageMs = Date.now() - data.timestamp;
+		raw = readFileSync(file, "utf-8");
+	} catch {
+		return { exists: true, age: null, size: null, modelCount: 0 };
+	}
+
+	const sizeBytes = Buffer.byteLength(raw);
+	const size = sizeBytes > 1024 ? `${(sizeBytes / 1024).toFixed(1)} KB` : `${sizeBytes} B`;
+
+	try {
+		const parsed = JSON.parse(raw);
+		const data = validateCacheData(parsed);
+
+		const ageMs = data ? Math.max(0, Date.now() - data.timestamp) : 0;
 		const minutes = Math.floor(ageMs / 60000);
 		const hours = Math.floor(minutes / 60);
-		const age = hours > 0 ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
-		const sizeBytes = Buffer.byteLength(raw);
-		const size = sizeBytes > 1024 ? `${(sizeBytes / 1024).toFixed(1)} KB` : `${sizeBytes} B`;
+		const age = data ? (hours > 0 ? `${hours}h ${minutes % 60}m` : `${minutes}m`) : null;
 
 		return {
 			exists: true,
 			age,
 			size,
-			modelCount: data.models.length,
+			modelCount: data ? data.models.length : 0,
 		};
 	} catch {
-		return { exists: false, age: null, size: null, modelCount: 0 };
+		return { exists: true, age: null, size, modelCount: 0 };
 	}
 }

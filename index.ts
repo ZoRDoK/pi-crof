@@ -7,8 +7,8 @@
  * Features:
  * - Dynamic model discovery from https://crof.ai/v1/models
  * - Persistent disk cache (~/.pi/agent/cache/pi-crof/models.json, TTL 1h)
- * - Graceful degradation: cache → static fallback on API failure
- * - Fetch timeouts (10s for models, 30s for chat)
+ * - Graceful degradation: cache → stale cache → static fallback
+ * - Fetch timeout (10s)
  *
  * Usage:
  *   # pi install git:git@github.com:ZoRDoK/pi-crof.git
@@ -17,7 +17,7 @@
  */
 
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import { readCache, writeCache, type CrofCacheEntry } from "./src/cache.ts";
+import { readCache, writeCache, validateCacheData, type CrofCacheEntry } from "./src/cache.ts";
 
 // =============================================================================
 // Constants
@@ -94,6 +94,22 @@ function mapApiModel(m: CrofCacheEntry): ProviderModelConfig {
 }
 
 /**
+ * Safely map an array of cache entries to provider models.
+ * Skips invalid entries instead of throwing.
+ */
+function safeMapModels(entries: CrofCacheEntry[]): ProviderModelConfig[] {
+	const result: ProviderModelConfig[] = [];
+	for (const entry of entries) {
+		try {
+			result.push(mapApiModel(entry));
+		} catch {
+			console.warn(`[pi-crof] Skipping invalid model entry: ${entry.id ?? "(no id)"}`);
+		}
+	}
+	return result;
+}
+
+/**
  * Fetch raw model data from the API with timeout.
  * Returns the raw cache entries (suitable for caching) and the mapped provider models.
  */
@@ -101,24 +117,20 @@ async function fetchRawModels(): Promise<{
 	raw: CrofCacheEntry[];
 	models: ProviderModelConfig[];
 }> {
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-	try {
-		const res = await fetch(`${BASE_URL}/models`, { signal: controller.signal });
-		if (!res.ok) throw new Error(`API returned ${res.status}`);
+	const res = await fetch(`${BASE_URL}/models`, {
+		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+	});
+	if (!res.ok) throw new Error(`API returned ${res.status}`);
 
-		const body = (await res.json()) as { data?: CrofCacheEntry[] };
-		if (!body.data || !Array.isArray(body.data) || body.data.length === 0) {
-			throw new Error("API returned empty model list");
-		}
-
-		return {
-			raw: body.data,
-			models: body.data.map(mapApiModel),
-		};
-	} finally {
-		clearTimeout(timeout);
+	const body = (await res.json()) as { data?: CrofCacheEntry[] };
+	if (!body.data || !Array.isArray(body.data) || body.data.length === 0) {
+		throw new Error("API returned empty model list");
 	}
+
+	return {
+		raw: body.data,
+		models: safeMapModels(body.data),
+	};
 }
 
 // =============================================================================
@@ -127,13 +139,13 @@ async function fetchRawModels(): Promise<{
 
 export default async function (pi: ExtensionAPI) {
 	let models: ProviderModelConfig[];
-	let source: "api" | "cache" | "fallback" = "fallback";
+	let source: "api" | "cache" | "stale-cache" | "fallback" = "fallback";
 
 	try {
 		// 1. Try cache first
 		const cached = readCache();
 		if (cached) {
-			models = cached.models.map(mapApiModel);
+			models = safeMapModels(cached.models);
 			source = "cache";
 			console.log(`[pi-crof] Loaded ${models.length} models from cache`);
 		} else {
@@ -145,17 +157,23 @@ export default async function (pi: ExtensionAPI) {
 			console.log(`[pi-crof] Fetched ${models.length} models from API`);
 		}
 	} catch (error) {
-		// 3. API failed — try stale cache
-		const stale = readCache({ ignoreTTL: true });
-		if (stale) {
-			models = stale.models.map(mapApiModel);
-			source = "cache";
-			console.warn(`[pi-crof] API failed, using stale cache (${models.length} models):`, error instanceof Error ? error.message : String(error));
-		} else {
-			// 4. Nothing works — use static fallback
+		// 3. API/cache failed — try stale cache (with extra safety net)
+		try {
+			const stale = readCache({ ignoreTTL: true });
+			if (stale) {
+				models = safeMapModels(stale.models);
+				source = "stale-cache";
+				console.warn(`[pi-crof] API failed, using stale cache (${models.length} models):`, error instanceof Error ? error.message : String(error));
+			} else {
+				models = FALLBACK_MODELS;
+				source = "fallback";
+				console.error(`[pi-crof] API failed and no cache available, using static fallback:`, error instanceof Error ? error.message : String(error));
+			}
+		} catch {
+			// Ultimate safety net — even stale cache reading/mapping threw
 			models = FALLBACK_MODELS;
 			source = "fallback";
-			console.error(`[pi-crof] API failed and no cache available, using static fallback (${models.length} models):`, error instanceof Error ? error.message : String(error));
+			console.error(`[pi-crof] All recovery paths failed, using static fallback:`, error instanceof Error ? error.message : String(error));
 		}
 	}
 
