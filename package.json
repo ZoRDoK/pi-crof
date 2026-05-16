@@ -27,11 +27,5 @@
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.0",
-    "@mariozechner/pi-coding-agent": "^0.73.1",
-    "tsx": "^4.22.0",
-    "typescript": "^6.0.3"
   }
 }
