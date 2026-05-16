@@ -1,6 +1,6 @@
 {
   "name": "pi-crof",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "CrofAI provider extension for pi",
   "keywords": [
     "pi",
@@ -29,7 +29,9 @@
     "node": ">=22.0.0"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
