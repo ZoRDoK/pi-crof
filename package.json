@@ -24,6 +24,11 @@
   "publishConfig": {
     "access": "public"
   },
+  "files": [
+    "index.ts",
+    "LICENSE",
+    "README.md"
+  ],
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
