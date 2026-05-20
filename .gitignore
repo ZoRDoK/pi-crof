@@ -18,6 +18,9 @@ pnpm-debug.log*
 !.env.example
 .npmrc
 
+# Screenshot tool
+_screenshot.*
+
 # OS / editors
 .DS_Store
 .vscode/

@@ -1,5 +1,7 @@
 # pi-crof
 
+![CrofAI Pricing](assets/pricing-models.png)
+
 A minimal pi extension that adds the **CrofAI** model provider via an OpenAI-compatible API.
 
 ## Files
