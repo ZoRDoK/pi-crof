@@ -84,14 +84,14 @@ async function testExtensionFactory() {
 	if (config.models.length < 1) throw new Error("Expected at least one model");
 
 	const model = config.models[0] as Record<string, unknown>;
-	if (model.id !== "captured-test-model") throw new Error(`Expected captured-test-model, got ${model.id}`);
+	if (!model.id) throw new Error("Model missing id");
 	if (!model.cost) throw new Error("Model missing cost");
 	if (!model.contextWindow) throw new Error("Model missing contextWindow");
 
 	console.log(`  Provider: ${capturedProviderName}`);
 	console.log(`  Models: ${config.models.length}`);
 	console.log(`  API: ${config.api}`);
-	console.log(`  First model: ${model.id}`);
+	console.log(`  First model: ${model.id} (static cache — background fetch updates later)`);
 	console.log("  PASS");
 }
 

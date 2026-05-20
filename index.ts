@@ -62,7 +62,10 @@ const STATIC_MODELS: ProviderModelConfig[] = [
 	{ id: "deepseek-v4-pro",                 name: "CrofAI: DeepSeek V4 Pro",              reasoning: true,  input: ["text"], cost: { input: 0.4,  output: 0.85, cacheRead: 0.003, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 131_072 },
 	{ id: "kimi-k2.5-lightning",             name: "CrofAI: Kimi K2.5 Lightning",          reasoning: true,  input: ["text", "image"], cost: { input: 1.0,  output: 3.0,  cacheRead: 0.2,   cacheWrite: 0 }, contextWindow: 131_072,   maxTokens: 32_768 },
 	{ id: "qwen3.5-9b",                      name: "CrofAI: Qwen 3.5 9B",                  reasoning: true,  input: ["text", "image"], cost: { input: 0.04, output: 0.15, cacheRead: 0.008, cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
-	{ id: "qwen3.5-9b-chat",                 name: "CrofAI: Qwen 3.5 9B Chat",             reasoning: true,  input: ["text", "image"], cost: { input: 0.04, output: 0.15, cacheRead: 0.008, cacheWrite: 0 }, contextWindow: 262_144,   maxTokens: 262_144 },
+	{ id: "glm-4.7",                          name: "CrofAI: GLM 4.7",                      reasoning: false, input: ["text"], cost: { input: 0.25, output: 1.1,  cacheRead: 0.05,  cacheWrite: 0 }, contextWindow: 202_752,   maxTokens: 202_752 },
+	{ id: "glm-4.7-flash",                    name: "CrofAI: GLM 4.7 Flash",                reasoning: false, input: ["text"], cost: { input: 0.04, output: 0.3,  cacheRead: 0.008, cacheWrite: 0 }, contextWindow: 202_752,   maxTokens: 131_072 },
+	{ id: "glm-5",                            name: "CrofAI: GLM 5",                        reasoning: false, input: ["text"], cost: { input: 0.48, output: 1.9,  cacheRead: 0.1,   cacheWrite: 0 }, contextWindow: 202_752,   maxTokens: 202_752 },
+	{ id: "greg",                             name: "CrofAI: Greg (Experimental)",           reasoning: false, input: ["text"], cost: { input: 0.1,  output: 0.2,  cacheRead: 0.02,  cacheWrite: 0 }, contextWindow: 229_376,   maxTokens: 229_376 },
 ];
 
 // =============================================================================
@@ -122,23 +125,29 @@ async function fetchModels(): Promise<ProviderModelConfig[]> {
 // Extension Entry Point
 // =============================================================================
 
-export default async function (pi: ExtensionAPI) {
-	let models: ProviderModelConfig[];
-
-	try {
-		models = await fetchModels();
-		console.log(`[pi-crof] Fetched ${models.length} models from API`);
-	} catch (error) {
-		console.error(`[pi-crof] Failed to fetch models, using static fallback:`, error instanceof Error ? error.message : String(error));
-		models = STATIC_MODELS;
-	}
-
+export default function (pi: ExtensionAPI) {
+	// Register provider immediately with cached static models so pi doesn't block.
 	pi.registerProvider("crof", {
 		baseUrl: BASE_URL,
 		apiKey: "CROF_API_KEY",
 		api: "openai-completions",
-		models,
+		models: STATIC_MODELS,
 	});
 
-	console.log(`[pi-crof] Registered provider "crof" with ${models.length} models`);
+	console.log(`[pi-crof] Registered provider "crof" with ${STATIC_MODELS.length} static models (cache)`);
+
+	// Fetch live models in background; replace when ready.
+	fetchModels()
+		.then((liveModels) => {
+			pi.registerProvider("crof", {
+				baseUrl: BASE_URL,
+				apiKey: "CROF_API_KEY",
+				api: "openai-completions",
+				models: liveModels,
+			});
+			console.log(`[pi-crof] Updated provider with ${liveModels.length} live models from API`);
+		})
+		.catch((error) => {
+			console.error(`[pi-crof] Background fetch failed, keeping static models:`, error instanceof Error ? error.message : String(error));
+		});
 }
