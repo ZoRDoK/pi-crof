@@ -10,18 +10,10 @@ A minimal pi extension that adds the **CrofAI** model provider via an OpenAI-com
 - `test.ts` — integration checks (`/models`, chat completions, streaming, reasoning, `/usage_api/`).
 - `.gitleaks.toml` — secret scanning rules.
 
-## Install via git
-
-Install globally:
+## Install
 
 ```bash
-pi install git:git@github.com:ZoRDoK/pi-crof.git
-```
-
-Install for current project only:
-
-```bash
-pi install -l git:git@github.com:ZoRDoK/pi-crof.git
+pi install npm pi-crof
 ```
 
 ## API key
