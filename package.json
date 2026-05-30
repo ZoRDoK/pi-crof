@@ -15,12 +15,12 @@
   "private": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ppowo/pi-crof.git"
+    "url": "git+https://github.com/ZoRDoK/pi-crof.git"
   },
   "bugs": {
-    "url": "https://github.com/ppowo/pi-crof/issues"
+    "url": "https://github.com/ZoRDoK/pi-crof/issues"
   },
-  "homepage": "https://github.com/ppowo/pi-crof#readme",
+  "homepage": "https://github.com/ZoRDoK/pi-crof#readme",
   "publishConfig": {
     "access": "public"
   },
