@@ -129,23 +129,23 @@ export default function (pi: ExtensionAPI) {
 	// Register provider immediately with cached static models so pi doesn't block.
 	pi.registerProvider("crof", {
 		baseUrl: BASE_URL,
-		apiKey: "CROF_API_KEY",
+		apiKey: "$CROF_API_KEY",
 		api: "openai-completions",
 		models: STATIC_MODELS,
 	});
 
-	console.log(`[pi-crof] Registered provider "crof" with ${STATIC_MODELS.length} static models (cache)`);
+
 
 	// Fetch live models in background; replace when ready.
 	fetchModels()
 		.then((liveModels) => {
 			pi.registerProvider("crof", {
 				baseUrl: BASE_URL,
-				apiKey: "CROF_API_KEY",
+				apiKey: "$CROF_API_KEY",
 				api: "openai-completions",
 				models: liveModels,
 			});
-			console.log(`[pi-crof] Updated provider with ${liveModels.length} live models from API`);
+
 		})
 		.catch((error) => {
 			console.error(`[pi-crof] Background fetch failed, keeping static models:`, error instanceof Error ? error.message : String(error));
